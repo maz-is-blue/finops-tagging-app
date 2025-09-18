@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FinOps Tagging App</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+    }
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.75);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 1000;
+    }
+    .modal-content {
+      background-color: #1f2937;
+      padding: 2.5rem;
+      border-radius: 0.75rem;
+      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+      max-width: 28rem;
+      width: 90%;
+    }
+  </style>
+</head>
+<body class="bg-gray-900 text-white font-inter">
+
+  <div id="root" class="p-4 md:p-8 lg:p-12 min-h-screen">
+    <h1 class="text-3xl md:text-4xl font-bold mb-8 text-center">Untagged Asset Management</h1>
+    
+    <div id="loading-message" class="text-center text-gray-400">Loading assets...</div>
+    <div id="error-message" class="text-center text-red-500 hidden"></div>
+
+    <div id="asset-table-container" class="overflow-x-auto shadow-xl rounded-lg hidden">
+      <table class="w-full text-left border-collapse">
+        <thead class="bg-gray-800">
+          <tr>
+            <th class="py-4 px-6 border-b border-gray-700 font-semibold text-lg">Asset Name</th>
+            <th class="py-4 px-6 border-b border-gray-700 font-semibold text-lg">Tags</th>
+            <th class="py-4 px-6 border-b border-gray-700 font-semibold text-lg text-center">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="asset-table-body">
+          <!-- Table rows will be inserted here by JavaScript -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Confirmation Modal -->
+  <div id="confirmation-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <h2 id="modal-title" class="text-xl font-bold mb-4">Confirm Action</h2>
+      <p id="modal-message" class="text-gray-300 mb-6"></p>
+      <div class="flex justify-end space-x-4">
+        <button id="modal-cancel" class="bg-gray-600 text-white px-5 py-2 rounded-lg hover:bg-gray-700 transition-colors duration-200">Cancel</button>
+        <button id="modal-confirm" class="bg-blue-600 text-white px-5 py-2 rounded-lg hover:bg-blue-700 transition-colors duration-200">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // --- Configuration (Update these with your actual details) ---
+    // In a real application, these would be securely managed, not hardcoded.
+    const GROQ_API_KEY = "YOUR_GROQ_API_KEY";
+    const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
+    const GROQ_MODEL = "llama-3.1-8b-instant";
+    const GCLOUD_PROJECT_ID = "YOUR_GCP_PROJECT_ID";
+    // This is where you would configure BigQuery and other GCP authentication.
+    // This is currently a mock for demonstration purposes.
+
+    let assets = [];
+    let loadingId = null;
+
+    // --- DOM Elements ---
+    const loadingMessage = document.getElementById('loading-message');
+    const errorMessage = document.getElementById('error-message');
+    const tableContainer = document.getElementById('asset-table-container');
+    const tableBody = document.getElementById('asset-table-body');
+
+    // --- Mock Data Fetching ---
+    // In a real scenario, this would be an authenticated API call to BigQuery
+    const fetchUntaggedAssets = () => {
+      return new Promise(resolve => {
+        setTimeout(() => {
+          resolve([
+            { id: '1', name: 'gcp-web-server-01', tags: {} },
+            { id: '2', name: 'gcp-database-analytics-dev', tags: {} },
+            { id: '3', name: 'gcp-load-balancer-internal', tags: {} },
+          ]);
+        }, 1000);
+      });
+    };
+
+    // --- Modal Functions ---
+    const modal = document.getElementById('confirmation-modal');
+    const modalTitle = document.getElementById('modal-title');
+    const modalMessage = document.getElementById('modal-message');
+    const modalConfirmButton = document.getElementById('modal-confirm');
+    const modalCancelButton = document.getElementById('modal-cancel');
+
+    const showModal = (title, message, onConfirm) => {
+      modalTitle.innerText = title;
+      modalMessage.innerText = message;
+      modal.classList.remove('hidden');
+      
+      const confirmHandler = () => {
+        onConfirm();
+        modalConfirmButton.removeEventListener('click', confirmHandler);
+        modal.classList.add('hidden');
+      };
+      const cancelHandler = () => {
+        modalConfirmButton.removeEventListener('click', confirmHandler);
+        modal.classList.add('hidden');
+      };
+
+      modalConfirmButton.addEventListener('click', confirmHandler);
+      modalCancelButton.addEventListener('click', cancelHandler);
+    };
+    
+    // --- Tag Suggestion Logic using Groq API ---
+    const getSuggestedTags = async (assetName) => {
+        // Construct the structured prompt
+        const messages = [
+            {
+                "role": "system",
+                "content": "You are a professional FinOps tagger. Your task is to analyze the provided asset details and extract key information to suggest relevant tags. You must respond with a JSON object that adheres to the following schema. Do not include any other text, explanations, or additional information in your response. The schema includes tags for 'project', 'environment', and 'team'."
+            },
+            {
+                "role": "user",
+                "content": `Suggest tags for an asset with the name: '${assetName}'.`
+            }
+        ];
+
+        const headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${GROQ_API_KEY}`
+        };
+
+        const body = JSON.stringify({
+            model: GROQ_MODEL,
+            messages: messages,
+            // Groq's Structured Outputs feature
+            response_format: { type: "json_object" }
+        });
+
+        const response = await fetch(GROQ_API_URL, {
+            method: 'POST',
+            headers: headers,
+            body: body
+        });
+        
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(`Groq API Error: ${errorData.error.message}`);
+        }
+
+        const data = await response.json();
+        return JSON.parse(data.choices[0].message.content);
+    };
+
+    const handleSuggestTags = async (assetId, assetName) => {
+      if (loadingId === assetId) return;
+      loadingId = assetId;
+      updateTable();
+
+      try {
+        const response = await getSuggestedTags(assetName);
+        const assetIndex = assets.findIndex(asset => asset.id === assetId);
+        if (assetIndex !== -1) {
+          assets[assetIndex].tags = response.suggested_tags;
+        }
+      } catch (error) {
+        console.error("Failed to get tags from LLM:", error);
+        alert("Error suggesting tags. Please check the console for details.");
+      } finally {
+        loadingId = null;
+        updateTable();
+      }
+    };
+
+    const handleApplyTags = (assetId) => {
+      showModal(
+        'Confirm Tag Application',
+        `Are you sure you want to apply these tags to asset ID: ${assetId}?`,
+        () => {
+          // In a real application, this would trigger an authenticated API call
+          // to the GCP Resource Manager to apply the tags.
+          console.log(`Tags applied to asset ${assetId}`);
+          
+          // You might remove the asset from the list or update its status here.
+          alert("Tags applied successfully!");
+        }
+      );
+    };
+
+    // --- HTML Rendering Functions ---
+    const createTagElement = (key, value) => {
+      return `
+        <span class="bg-blue-600 text-white text-xs font-semibold px-3 py-1 rounded-full shadow-sm">
+          ${key}:${value}
+        </span>
+      `;
+    };
+
+    const createAssetRow = (asset) => {
+      const tagsHtml = Object.keys(asset.tags).length > 0
+        ? `<div class="flex flex-wrap gap-2">${Object.entries(asset.tags).map(([key, value]) => createTagElement(key, value)).join('')}</div>`
+        : `<span class="text-gray-500">No tags suggested</span>`;
+        
+      const isApplying = loadingId === asset.id;
+
+      const actionsHtml = `
+        <div class="flex flex-col sm:flex-row justify-center items-center gap-3">
+          <button
+            onclick="handleSuggestTags('${asset.id}', '${asset.name}')"
+            class="bg-green-600 text-white px-5 py-2 rounded-lg shadow-md hover:bg-green-700 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 focus:ring-offset-gray-900 ${isApplying ? 'opacity-50 cursor-not-allowed' : ''}"
+            ${isApplying ? 'disabled' : ''}
+          >
+            ${isApplying ? 'Loading...' : 'Suggest Tags'}
+          </button>
+          ${Object.keys(asset.tags).length > 0 ? `
+            <button
+              onclick="handleApplyTags('${asset.id}')"
+              class="bg-blue-600 text-white px-5 py-2 rounded-lg shadow-md hover:bg-blue-700 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900"
+            >
+              Apply Tags
+            </button>
+          ` : ''}
+        </div>
+      `;
+
+      return `
+        <tr class="border-b border-gray-700 transition-colors duration-200 hover:bg-gray-800">
+          <td class="py-4 px-6 text-base">${asset.name}</td>
+          <td class="py-4 px-6 text-sm">${tagsHtml}</td>
+          <td class="py-4 px-6 text-center">${actionsHtml}</td>
+        </tr>
+      `;
+    };
+
+    const updateTable = () => {
+      tableBody.innerHTML = assets.map(createAssetRow).join('');
+    };
+
+    const init = async () => {
+      try {
+        loadingMessage.classList.remove('hidden');
+        const fetchedAssets = await fetchUntaggedAssets();
+        assets = fetchedAssets;
+        updateTable();
+        tableContainer.classList.remove('hidden');
+      } catch (e) {
+        errorMessage.innerText = 'Failed to fetch assets. Please check your configuration.';
+        errorMessage.classList.remove('hidden');
+      } finally {
+        loadingMessage.classList.add('hidden');
+      }
+    };
+
+    document.addEventListener('DOMContentLoaded', init);
+  </script>
+
+</body>
+</html>
